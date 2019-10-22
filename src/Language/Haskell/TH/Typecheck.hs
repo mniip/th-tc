@@ -311,7 +311,7 @@ name_UnboxedSum = mkNameG_tc "ghc-prim" "GHC.Prim"
 name_PromotedTuple = mkNameG_d "ghc-prim" "GHC.Tuple"
 
 name_Arrow, name_Equality, name_List, name_Nil, name_Cons, name_Constraint,
-  name_Symbol, name_Nat :: Name
+  name_Symbol, name_Nat, name_TYPE :: Name
 name_Arrow = mkNameG_tc "ghc-prim" "GHC.Prim" "->"
 name_Equality = mkNameG_tc "base" "Data.Type.Equality" "~"
 name_List = mkNameG_tc "ghc-prim" "GHC.Types" "[]"
@@ -320,6 +320,7 @@ name_Cons = mkNameG_d "ghc-prim" "GHC.Types" ":"
 name_Constraint = mkNameG_tc "ghc-prim" "GHC.Types" "Constraint"
 name_Symbol = mkNameG_tc "ghc-prim" "GHC.Types" "Symbol"
 name_Nat = mkNameG_tc "ghc-prim" "GHC.Types" "Nat"
+name_TYPE = mkNameG_tc "ghc-prim" "GHC.Prim" "TYPE"
 
 isConName :: Type -> Maybe ConName
 isConName (ConT nm) = Just $ Con nm
@@ -342,6 +343,7 @@ isConName PromotedNilT = Just $ Promoted name_Nil
 isConName PromotedConsT = Just $ Promoted name_Cons
 isConName StarT = Just StarCon
 isConName ConstraintT = Just $ Con name_Constraint
+isConName (AppT (ConT nm) _) | nm == name_TYPE = Just StarCon
 isConName _ = Nothing
 
 mkArrow :: [Type] -> Type -> Type
