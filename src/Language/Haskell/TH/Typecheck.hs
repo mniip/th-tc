@@ -19,10 +19,13 @@ module Language.Haskell.TH.Typecheck
   , runTc
   , TV
   , freshUnifTV
+  , HasTV(..)
   , extractKind
   , unifyTy
+  , unifyTys
   , UnifyResult(..)
   , unifyTyResult
+  , unifyTysResult
   , extractSubst
   , substZonked
   ) where
@@ -152,53 +155,60 @@ freshUnifTV = do
   tsUnifVars . at v .= Just ()
   pure v
 
+-- | A class for thigns that contain type variables.
 class HasTV a where
-  instantiate :: MonadTc m => a -> StateT (M.Map TV TV) m a
+  -- | Replace all free variables with fresh unificational type variables.
+  instantiate :: MonadTc m => a -> m a
+  instantiate x = evalStateT (instantiating x) M.empty
+  -- | Replace all free variables with fresh unificational type variables, in
+  -- a state transformer.
+  instantiating :: MonadTc m => a -> StateT (M.Map TV TV) m a
+  -- | Free variables.
   occurrences :: a -> S.Set TV
 
 instance HasTV Name where
-  instantiate v = do
+  instantiating v = do
     use (at v) >>= \case
       Just v' -> pure v'
       Nothing -> do
         v' <- lift freshUnifTV
         at v .= Just v'
-        k' <- lift (tvKind v) >>= instantiate
+        k' <- lift (tvKind v) >>= instantiating
         lift $ tvSetKind v' k'
         pure v'
   occurrences = S.singleton
 
 instance HasTV a => HasTV [a] where
-  instantiate = traverse instantiate
+  instantiating = traverse instantiating
   occurrences = S.unions . L.map occurrences
 
 instance (HasTV a, HasTV b) => HasTV (a, b) where
-  instantiate (x, y) = (,) <$> instantiate x <*> instantiate y
+  instantiating (x, y) = (,) <$> instantiating x <*> instantiating y
   occurrences (x, y) = occurrences x `S.union` occurrences y
 
 instance HasTV Type where
-  instantiate (ForallT tvbs cxt ty) = ForallT
+  instantiating (ForallT tvbs cxt ty) = ForallT
     <$> traverse protectTVB tvbs
-    <*> traverse instantiate cxt
-    <*> instantiate ty
+    <*> traverse instantiating cxt
+    <*> instantiating ty
     where
       protectTVB :: MonadTc m => TyVarBndr -> StateT (M.Map TV TV) m TyVarBndr
       protectTVB (PlainTV v) = (at v .= Just v) *> pure (PlainTV v)
       protectTVB (KindedTV v k) =
-        (at v .= Just v) *> (KindedTV v <$> instantiate k)
-  instantiate (AppT f x) = AppT <$> instantiate f <*> instantiate x
-  instantiate (SigT t k) = SigT <$> instantiate t <*> instantiate k
-  instantiate (VarT v) = VarT <$> instantiate v
-  instantiate (InfixT x op y) = InfixT
-    <$> instantiate x
+        (at v .= Just v) *> (KindedTV v <$> instantiating k)
+  instantiating (AppT f x) = AppT <$> instantiating f <*> instantiating x
+  instantiating (SigT t k) = SigT <$> instantiating t <*> instantiating k
+  instantiating (VarT v) = VarT <$> instantiating v
+  instantiating (InfixT x op y) = InfixT
+    <$> instantiating x
     <*> pure op
-    <*> instantiate y
-  instantiate (UInfixT x op y) = UInfixT
-    <$> instantiate x
+    <*> instantiating y
+  instantiating (UInfixT x op y) = UInfixT
+    <$> instantiating x
     <*> pure op
-    <*> instantiate y
-  instantiate (ParensT t) = ParensT <$> instantiate t
-  instantiate t = pure t
+    <*> instantiating y
+  instantiating (ParensT t) = ParensT <$> instantiating t
+  instantiating t = pure t
   occurrences (ForallT _ cxt ty) = occurrences cxt <> occurrences ty
   occurrences (AppT f x) = occurrences f <> occurrences x
   occurrences (SigT t k) = occurrences t <> occurrences k
@@ -207,9 +217,6 @@ instance HasTV Type where
   occurrences (UInfixT x _ y) = occurrences x <> occurrences y
   occurrences (ParensT t) = occurrences t
   occurrences _ = S.empty
-
-runInstantiate :: Monad m => StateT (M.Map TV TV) m a -> m a
-runInstantiate = (`evalStateT` M.empty)
 
 occursCheck :: MonadTc m => TV -> Type -> m ()
 occursCheck v t = do
@@ -397,8 +404,8 @@ tryExpandTyFam True cn args = conInfo cn >>= \case
       => S.Set Natural -> [(Natural, AxBranch)] -> [Type] -> m (Maybe Type)
     matchAxiom apart ((i, AxBranch{..}):as) args
       | all (`S.member` apart) axIncomp = do
-        (lhs, rhs) <- runInstantiate $ instantiate (axLhs, axRhs)
-        unifyTysResult True lhs args >>= \case
+        (lhs, rhs) <- instantiate (axLhs, axRhs)
+        unifyTysResultE True {- args could have TFs -} lhs args >>= \case
           Equal -> pure $ Just rhs
           Unknown _ -> matchAxiom apart as args
           Apart _ -> matchAxiom (S.insert i apart) as args
@@ -438,32 +445,30 @@ tryZonk unify v t' = isUnifTV v >>= \case
         else Unknown $ matchError v v'
     _ -> pure $ Unknown $ matchError (VarT v) t'
 
--- | Attempt unification and return an indication of whether the types were
--- equal or not.
-unifyTyResult
+unifyTyResultE
   :: MonadTc m
   => Bool -- ^ expand type familes? 
   -> Type -> Type -> m UnifyResult
-unifyTyResult expand (VarT v) t' = tryZonk (unifyTyResult expand) v t'
-unifyTyResult expand t (VarT v') = tryZonk (flip $ unifyTyResult expand) v' t
-unifyTyResult expand (SigT t k) t' = do
+unifyTyResultE expand (VarT v) t' = tryZonk (unifyTyResultE expand) v t'
+unifyTyResultE expand t (VarT v') = tryZonk (flip $ unifyTyResultE expand) v' t
+unifyTyResultE expand (SigT t k) t' = do
   extractKind t' >>= unifyTy k
-  unifyTyResult expand t t'
-unifyTyResult expand t (SigT t' k') = do
+  unifyTyResultE expand t t'
+unifyTyResultE expand t (SigT t' k') = do
   extractKind t >>= unifyTy k'
-  unifyTyResult expand t t'
-unifyTyResult expand t t' =
+  unifyTyResultE expand t t'
+unifyTyResultE expand t t' =
   liftA2 (,) (trySplitApp t) (trySplitApp t') >>= \case
-    (App f x, App f' x') -> unifyTysResult expand [f, x] [f', x']
+    (App f x, App f' x') -> unifyTysResultE expand [f, x] [f', x']
     (FamApp cn args, r') -> tryExpandTyFam expand cn args >>= \case
-      Just t -> unifyTyResult expand t t'
+      Just t -> unifyTyResultE expand t t'
       Nothing -> case r' of
         FamApp cn' args' -> tryExpandTyFam expand cn' args' >>= \case
-          Just t' -> unifyTyResult expand t t'
+          Just t' -> unifyTyResultE expand t t'
           Nothing -> plainUnifyTyResult t t'
         _ -> pure $ Unknown $ matchError t t'
     (_, FamApp cn' args') -> tryExpandTyFam expand cn' args' >>= \case
-       Just t' -> unifyTyResult expand t t'
+       Just t' -> unifyTyResultE expand t t'
        Nothing -> pure $ Unknown $ matchError t t'
     (SingleCon cn, SingleCon cn') -> pure $ if cn == cn'
       then Equal else Apart $ matchError cn cn'
@@ -477,36 +482,52 @@ unifyTyResult expand t t' =
     plainUnifyTyResult t@(AppT f x) t'@(AppT f' x') =
       plainUnifyTyResult f f' >>= \case
         Apart _ -> pure $ Apart $ matchError t t'
-        _ -> unifyTyResult expand x x' >>= \case
+        _ -> unifyTyResultE expand x x' >>= \case
           Apart _ -> pure $ Apart $ matchError t t'
           Unknown _ -> pure $ Unknown $ matchError t t'
           Equal -> pure Equal
-    plainUnifyTyResult t t' = unifyTyResult expand t t'
+    plainUnifyTyResult t t' = unifyTyResultE expand t t'
 
-unifyTysResult :: MonadTc m => Bool -> [Type] -> [Type] -> m UnifyResult
-unifyTysResult _ [] [] = pure Equal
-unifyTysResult expand (t:ts) (t':ts') = unifyTyResult expand t t' >>= \case
+unifyTysResultE
+  :: MonadTc m
+  => Bool -- ^ expand type families?
+  -> [Type] -> [Type] -> m UnifyResult
+unifyTysResultE _ [] [] = pure Equal
+unifyTysResultE expand (t:ts) (t':ts') = unifyTyResultE expand t t' >>= \case
   Apart err -> pure $ Apart err
-  r -> unifyTysResult expand ts ts' >>= \case
+  r -> unifyTysResultE expand ts ts' >>= \case
     Apart err -> pure $ Apart err
     Equal -> pure r
     rs -> pure rs
-unifyTysResult _ _ _ =
-  tcFail "Constructor applied to a different number of arguments"
+unifyTysResultE _ _ _ =
+  pure $ Apart "Constructor applied to a different number of arguments"
+
+-- | Attempt unification and return an indication of whether the types were
+-- equal or not.
+unifyTyResult :: MonadTc m => Type -> Type -> m UnifyResult
+unifyTyResult = unifyTyResultE True
 
 -- | Assert that two types are equal, and replace unificational variables as
 -- necessary. Throws an error if the two types cannot be shown equal.
 unifyTy :: MonadTc m => Type -> Type -> m ()
-unifyTy t t' = unifyTyResult True t t' >>= \case
+unifyTy t t' = unifyTyResult t t' >>= \case
   Equal -> pure ()
   Unknown err -> tcFail err
   Apart err -> tcFail err
 
+-- | Attempt unifying two lists of types. If any two corresponding types in the
+-- lists are apart, returns 'Apart'. If the lists are of different lengths,
+-- returns 'Apart'.
+unifyTysResult :: MonadTc m => [Type] -> [Type] -> m UnifyResult
+unifyTysResult = unifyTysResultE True
+
+-- | Assert that two lists of types are equal, replace unificational variables
+-- as necessary. Throws an error if two corresponding types could not be shown
+-- to be equal, or if lists have different lengths.
 unifyTys :: MonadTc m => [Type] -> [Type] -> m ()
-unifyTys ts ts' = unifyTysResult True ts ts' >>= \case
-  Equal -> pure ()
-  Unknown err -> tcFail err
-  Apart err -> tcFail err
+unifyTys [] [] = pure ()
+unifyTys (t:ts) (t':ts') = unifyTy t t' >> unifyTys ts ts'
+unifyTys _ _ = tcFail "Constructor applied to a different number of arguments"
 
 -- | Recursively collect all zonked (unified with a type) unificational
 -- variables in the type, into a substitution. This is a separate step because
@@ -557,7 +578,7 @@ extractKind (VarT v) = isZonked v >>= \case
 extractKind t = trySplitApp t >>= \case
   FamApp cn args -> conInfo cn >>= \case
     TcFam{..} -> do
-      (aks, rk) <- runInstantiate $ instantiate (famArgKinds, famResKind)
+      (aks, rk) <- instantiate (famArgKinds, famResKind)
       aks' <- traverse extractKind args
       unifyTys aks aks'
       pure rk
@@ -568,7 +589,7 @@ extractKind t = trySplitApp t >>= \case
     kv <- freshUnifTV
     unifyTy kf (ArrowT `AppT` k `AppT` VarT kv)
     pure $ VarT kv
-  SingleCon cn -> runInstantiate . instantiate =<< tcConKind cn
+  SingleCon cn -> instantiate =<< tcConKind cn
 
 unifyKind :: MonadTc m => Kind -> Type -> m ()
 unifyKind k t = extractKind t >>= unifyTy k
@@ -638,11 +659,11 @@ checkIncomps = go [] . zip [0..]
         True -> check ax axs
         False -> (i:) <$> check ax axs
     compat ax ax' = do
-      ((lhs, rhs), (lhs', rhs')) <- runInstantiate $ instantiate (ax, ax')
-      unifyTysResult False lhs lhs' >>= \case
+      ((lhs, rhs), (lhs', rhs')) <- instantiate (ax, ax')
+      unifyTysResultE False {- there shouldn't be any -} lhs lhs' >>= \case
         Apart _ -> pure True
         Unknown _ -> pure False
-        Equal -> skolemizing (rhs, rhs') (unifyTyResult False rhs rhs') >>=
+        Equal -> skolemizing (rhs, rhs') (unifyTyResultE False rhs rhs') >>=
           \case
             Equal -> pure True
             _ -> pure False

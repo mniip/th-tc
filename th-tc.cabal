@@ -1,5 +1,5 @@
 name:                th-tc
-version:             0.1.1.0
+version:             0.2.0.0
 synopsis:            Typechecking in Template Haskell
 description:         Typechecking in Template Haskell.
 homepage:            https://github.com/mniip/th-tc
