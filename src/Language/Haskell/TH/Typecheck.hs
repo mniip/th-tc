@@ -34,13 +34,14 @@ import Control.Applicative
 import Control.Lens
 import Control.Monad.State.Class
 import Control.Monad.Trans
-import Control.Monad.Trans.State (StateT, evalStateT, liftCatch)
+import Control.Monad.Trans.State (StateT, evalStateT)
 import Data.Foldable
 import Data.List as L
 import Data.Maybe
 import Data.Map as M
 import Data.Set as S
 import Language.Haskell.TH
+import Language.Haskell.TH.Instances () -- Quasi StateT
 import Language.Haskell.TH.Syntax hiding (lift)
 import Numeric.Natural
 
@@ -100,31 +101,6 @@ makeLenses ''TcScope
 -- | Constraints for the typechecking monad. You probably want to use
 -- @m ~ 'StateT' 'TcScope' 'Q'@
 type MonadTc m = (Quasi m, MonadState TcScope m)
-
-instance Quasi m => Quasi (StateT s m) where
-  qNewName = lift . qNewName
-  qReport = (lift .) . qReport
-  qRecover m r = liftCatch (\m r -> qRecover m $ r ()) m (const r)
-  qLookupName = (lift .) . qLookupName
-  qReify = lift . qReify
-  qReifyFixity = lift . qReifyFixity
-  qReifyInstances = (lift .) . qReifyInstances
-  qReifyRoles = lift . qReifyRoles
-  qReifyAnnotations = lift . qReifyAnnotations
-  qReifyModule = lift . qReifyModule
-  qReifyConStrictness = lift . qReifyConStrictness
-  qLocation = lift qLocation
-  qRunIO = lift . qRunIO
-  qAddDependentFile = lift . qAddDependentFile
-  qAddTempFile = lift . qAddTempFile
-  qAddTopDecls = lift . qAddTopDecls
-  qAddForeignFilePath = (lift .) . qAddForeignFilePath
-  qAddModFinalizer = lift . qAddModFinalizer
-  qAddCorePlugin = lift . qAddCorePlugin
-  qGetQ = lift qGetQ
-  qPutQ = lift . qPutQ
-  qIsExtEnabled = lift . qIsExtEnabled
-  qExtsEnabled = lift qExtsEnabled
 
 -- | Execute a typechecker computation. Unificational variables will not persist
 -- between different 'runTc' blocks.
@@ -262,7 +238,8 @@ zonkTV :: MonadTc m => TV -> Type -> m ()
 zonkTV tv ty = do
   isUnifTV tv >>= \case
     True -> case ty of
-      VarT tv' | tv == tv' -> tcFail $ "Attempted to zonk a tyvar with itself: " ++ show tv
+      VarT tv' | tv == tv'
+        -> tcFail $ "Attempted to zonk a tyvar with itself: " ++ show tv
       _ -> pure ()
     False -> tcFail $ "Attempted to zonk a skolem " ++ show tv
   use (tsZonkedVars . at tv) >>= \case

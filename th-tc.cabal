@@ -16,6 +16,7 @@ library
   exposed-modules:       Language.Haskell.TH.Typecheck
   build-depends:         base >=4.12 && <4.13
                        , template-haskell >= 2.14
+                       , th-orphans >= 0.11
                        , containers >= 0.6
                        , lens >= 4.0
                        , transformers >= 0.5
